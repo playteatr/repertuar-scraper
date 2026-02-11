@@ -1,0 +1,11 @@
+{
+  "name": "repertuar-scraper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
+    "dayjs": "^1.11.10",
+    "undici": "^6.6.2"
+  }
+}
