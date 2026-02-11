@@ -57,6 +57,18 @@ async function getHtml(url, timeoutMs = 9000) {
   }
 }
 
+function normalizeDateToken(s) {
+  if (!s) return null;
+  s = String(s).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;              // YYYY-MM-DD
+  const m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);      // DD.MM.YYYY
+  if (m) {
+    const dd = m[1].padStart(2,'0'), mm = m[2].padStart(2,'0'), yyyy = m[3];
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return null;
+}
+
 // Wyciąganie JSON-LD (Event) — uniwersalne
 function extractEventsFromJsonLd(html, defaults) {
   const blocks = [...html.matchAll(
@@ -96,89 +108,120 @@ function extractEventsFromJsonLd(html, defaults) {
     try {
       const data = JSON.parse(m[1]);
       if (Array.isArray(data)) data.forEach(walk); else walk(data);
-    } catch {
-      // ignoruj błędny blok
-    }
+    } catch {/* ignoruj błędny blok */}
   }
   return out;
 }
 
-// (opcjonalny) bardzo zachowawczy fallback — tylko próba podłapania dat/godzin w treści.
-function ultraSafeFallback(html, defaults) {
-  // Szukamy fragmentów z datą i godziną, ale nic nie gwarantujemy — lepiej zwrócić []
-  // niż zepsuć cały endpoint. Docelowo można tu dodać dedykowane selektory per teatr.
-  const events = [];
-  // przykład: dopasuj YYYY-MM-DD lub DD.MM.YYYY oraz HH:mm w odległości do 120 znaków
-  const dateRe = /(\d{4}-\d{2}-\d{2}|\b\d{1,2}\.\d{1,2}\.\d{4}\b)/g;
-  const timeRe = /\b\d{1,2}:\d{2}\b/;
+// ====== FALLBACK DLA OPERy ŚLĄSKIEJ (custom) ======
+// Heurystyka: bierzemy segmenty z <time datetime="..."> albo z datą/ godziną w tekście
+// i w pobliżu szukamy tytułu (w <a> lub <h1-6>). Zero zależności, czysty tekst/regex.
+function fallbackOperaSlaska(html, defaults) {
+  const out = [];
+  if (!html) return out;
 
-  const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  let m;
-  while ((m = dateRe.exec(text)) !== null) {
-    const around = text.slice(Math.max(0, m.index - 120), m.index + 120);
-    const timeM = around.match(timeRe);
-    const title = around.replace(dateRe, ' ').replace(timeRe, ' ').trim().slice(0, 120);
-    // Uproszczona normalizacja daty
-    let iso = m[1];
-    if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(iso)) {
-      const [d,mm,y] = iso.split('.');
-      iso = `${y}-${mm.padStart(2,'0')}-${d.padStart(2,'0')}`;
-    }
-    const { date, time } = { date: iso, time: timeM ? timeM[0] : null };
-    if (date && title) {
-      events.push({
+  // 1) Spróbuj time[datetime] (najlepszy sygnał)
+  const timeBlocks = [...html.matchAll(/<time[^>]*datetime=["']([^"']+)["'][^>]*>([\s\S]*?)<\/time>/gi)];
+  for (const m of timeBlocks) {
+    const start = m[1];
+    const { date, time } = toDateTimeInTZ(start, TZ);
+    if (!date) continue;
+
+    // Szukamy tytułu w oknie +/- 300 znaków względem znacznika <time>
+    const idx = m.index ?? 0;
+    const winStart = Math.max(0, idx - 300);
+    const winEnd   = Math.min(html.length, idx + 600);
+    const win = html.slice(winStart, winEnd);
+
+    // Kandydat tytułu: najbliższy <a>...</a> lub <h1-6>...</h1-6>
+    let title = null;
+    const aMatch = win.match(/<a\b[^>]*>([^<]{3,120})<\/a>/i);
+    const hMatch = win.match(/<h[1-6]\b[^>]*>([^<]{3,160})<\/h[1-6]>/i);
+    if (aMatch) title = aMatch[1].replace(/\s+/g,' ').trim();
+    if (!title && hMatch) title = hMatch[1].replace(/\s+/g,' ').trim();
+
+    if (title) {
+      out.push({
         city: defaults.city, theatre: defaults.theatre,
-        title: title, date, time, url: defaults.url
+        title, date, time, url: defaults.url
       });
     }
   }
-  return events;
-}
 
-// ====== HANDLER ======
-export default async function handler(req, res) {
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  // 2) Jeśli nic nie wyszło, próbuj heurystyki tekstowej (data + godzina blisko siebie)
+  if (out.length === 0) {
+    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    const dateRe = /(\d{4}-\d{2}-\d{2}|\b\d{1,2}\.\d{1,2}\.\d{4}\b)/g;
+    const timeRe = /\b\d{1,2}:\d{2}\b/;
 
-  // 1) Jaki dzień bierzemy?
-  let wantDate = todayInTZ(TZ);
-  try {
-    const u = new URL(req.url, 'http://localhost');
-    wantDate = u.searchParams.get('date') || wantDate;
-  } catch {}
+    let m;
+    while ((m = dateRe.exec(text)) !== null) {
+      const iso = normalizeDateToken(m[1]);
+      if (!iso) continue;
 
-  try {
-    const results = [];
+      const around = text.slice(Math.max(0, m.index - 120), m.index + 160);
+      const timeM = around.match(timeRe);
+      const titleCand = around
+        .replace(dateRe, ' ')
+        .replace(timeRe, ' ')
+        .replace(/\s+/g,' ')
+        .trim()
+        .slice(0, 120);
 
-    // 2) Jedziemy po teatrach — sekwencyjnie, z try/catch; żadnych crashy
-    for (const t of THEATRES) {
-      try {
-        const html = await getHtml(t.url);
-        if (!html) continue;
-        // Najpierw JSON-LD:
-        let items = extractEventsFromJsonLd(html, t);
-        // Jeśli brak — ultra ostrożny fallback (może nic nie złapać; to OK):
-        if (items.length === 0) {
-          items = ultraSafeFallback(html, t);
-        }
-        // Filtr na dzień:
-        items = items.filter(e => e.date === wantDate);
-        results.push(...items);
-      } catch {
-        // ignoruj pojedyncze padnięte źródło
+      if (titleCand) {
+        out.push({
+          city: defaults.city, theatre: defaults.theatre,
+          title: titleCand, date: iso, time: timeM ? timeM[0] : null, url: defaults.url
+        });
       }
     }
-
-    // 3) Sort: miasto → godzina → teatr → tytuł
-    results.sort((a,b)=>{
-      const c=(a.city||'').localeCompare(b.city||''); if(c) return c;
-      const at=a.time||'99:99', bt=b.time||'99:99'; if(at!==bt) return at.localeCompare(bt);
-      const t=(a.theatre||'').localeCompare(b.theatre||''); if(t) return t;
-      return (a.title||'').localeCompare(b.title||'');
-    });
-
-    return res.status(200).json(results);
-  } catch {
-    // Nigdy 500 z HTML-em — najwyżej pustą listę
-    return res.status(200).json([]);
   }
+
+  // Unikalność (title+date+time)
+  const seen = new Set();
+  return out.filter(e=>{
+    const key = `${e.title}|${e.date}|${e.time||''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
+
+// ====== OGÓLNY fallback — bardzo zachowawczy (dla innych stron) ======
+function ultraSafeFallback(html, defaults) {
+  const events = [];
+  if (!html) return events;
+
+  // 1) time[datetime] blisko jakiegoś linku/nagłówka
+  const timeBlocks = [...html.matchAll(/<time[^>]*datetime=["']([^"']+)["'][^>]*>([\s\S]*?)<\/time>/gi)];
+  for (const m of timeBlocks) {
+    const start = m[1];
+    const { date, time } = toDateTimeInTZ(start, TZ);
+    if (!date) continue;
+
+    const idx = m.index ?? 0;
+    const winStart = Math.max(0, idx - 250);
+    const winEnd   = Math.min(html.length, idx + 500);
+    const win = html.slice(winStart, winEnd);
+    let title = null;
+    const aMatch = win.match(/<a\b[^>]*>([^<]{3,120})<\/a>/i);
+    const hMatch = win.match(/<h[1-6]\b[^>]*>([^<]{3,160})<\/h[1-6]>/i);
+    if (aMatch) title = aMatch[1].replace(/\s+/g,' ').trim();
+    if (!title && hMatch) title = hMatch[1].replace(/\s+/g,' ').trim();
+
+    if (title) {
+      events.push({
+        city: defaults.city, theatre: defaults.theatre,
+        title, date, time, url: defaults.url
+      });
+    }
+  }
+
+  // 2) Bardzo miękki tekstowy fallback
+  if (events.length === 0) {
+    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    const dateRe = /(\d{4}-\d{2}-\d{2}|\b\d{1,2}\.\d{1,2}\.\d{4}\b)/g;
+    const timeRe = /\b\d{1,2}:\d{2}\b/;
+
+    let m;
+
