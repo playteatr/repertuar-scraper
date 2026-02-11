@@ -5,9 +5,9 @@ export default async function handler(req, res) {
 
   res.status(200).json([
     {
-      city: "Test City",
+      city: "Katowice",
       theatre: "Test Theatre",
-      title: "Świat działa",
+      title: "API DZIAŁA",
       date: today,
       time: "19:00",
       url: "https://example.com"
