@@ -20,10 +20,13 @@ export default async function handler(req, res) {
 
     // 3) Tu wpisujesz źródła (na start tylko zaglebie)
     
+
 const SOURCES = [
   `${base}/api/zaglebie${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}`,
-  `${base}/api/opera${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}` // <— DODANE
+  `${base}/api/opera${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}`,
+  `${base}/api/slaski${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}` // <— NOWE
 ];
+
 
 
     const results = [];
