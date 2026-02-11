@@ -16,7 +16,7 @@ const THEATRES = [
   { id:'teatr_miejski_gli',    city:'Gliwice',      theatre:'Teatr Miejski w Gliwicach',            url:'https://teatr.gliwice.pl/repertuar/' },
   { id:'teatr_slaski',         city:'Katowice',     theatre:'Teatr Śląski im. S. Wyspiańskiego',    url:'https://teatrslaski.art.pl/repertuar/' },
   { id:'ateneum_kato',         city:'Katowice',     theatre:'Śląski Teatr Lalki i Aktora Ateneum',  url:'https://ateneumteatr.pl/' },
-  { id:'teatr_zaglebie',       city:'Sosnowiec',    theatre:'Teatr Zagłębia',                       url:'https://teatrzaglebia.pl/repertuar/' },
+  { id:'teatr_zaglebie',       city:'Sosnowiec',    theatre:'Teatr Zagłębia',                       url:'https://teatrzaglebia.pl/repertuar/' }, // oficjalna strona repertuaru
   { id:'teatr_maly_tychy',     city:'Tychy',        theatre:'Teatr Mały',                           url:'https://teatrmaly.tychy.pl/kalendarium/' },
   { id:'teatr_nowy_zabrze',    city:'Zabrze',       theatre:'Teatr Nowy w Zabrzu',                  url:'https://teatrzabrze.pl/repertuar/' },
   { id:'teatr_mick_cieszyn',   city:'Cieszyn',      theatre:'Teatr im. A. Mickiewicza',             url:'https://teatr.cieszyn.pl/' }
@@ -69,6 +69,23 @@ function normalizeDateToken(s) {
   return null;
 }
 
+// polskie miesiące -> MM (np. "8 lutego 2026")
+function plDateToISO(s) {
+  if (!s) return null;
+  const txt = String(s).toLowerCase().normalize('NFC').trim();
+  const map = {
+    'stycznia':'01','lutego':'02','marca':'03','kwietnia':'04','maja':'05','czerwca':'06',
+    'lipca':'07','sierpnia':'08','września':'09','października':'10','listopada':'11','grudnia':'12'
+  };
+  const m = txt.match(/(\d{1,2})\s+([a-ząćęłńóśźż]+)\s+(\d{4})/i);
+  if (!m) return null;
+  const dd = m[1].padStart(2,'0');
+  const mm = map[m[2]] || null;
+  const yyyy = m[3];
+  if (!mm) return null;
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 // Wyciąganie JSON-LD (Event) — uniwersalne
 function extractEventsFromJsonLd(html, defaults) {
   const blocks = [...html.matchAll(
@@ -113,30 +130,26 @@ function extractEventsFromJsonLd(html, defaults) {
   return out;
 }
 
-// ====== FALLBACK DLA OPERy ŚLĄSKIEJ (custom) ======
-// Heurystyka: bierzemy segmenty z <time datetime="..."> albo z datą/ godziną w tekście
-// i w pobliżu szukamy tytułu (w <a> lub <h1-6>). Zero zależności, czysty tekst/regex.
+// ====== FALLBACK DLA OPERY ŚLĄSKIEJ (custom) ======
+// Heurystyka: <time datetime="..."> + wyszukanie tytułu w pobliżu linku/nagłówka.
 function fallbackOperaSlaska(html, defaults) {
   const out = [];
   if (!html) return out;
 
-  // 1) Spróbuj time[datetime] (najlepszy sygnał)
-  const timeBlocks = [...html.matchAll(/<time[^>]*datetime=["']([^"']+)["'][^>]*>([\s\S]*?)<\/time>/gi)];
+  const timeBlocks = [...html.matchAll(/<time[^>]+datetime=["']([^"']+)["'][^>]*>[\s\S]*?<\/time>/gi)];
   for (const m of timeBlocks) {
     const start = m[1];
     const { date, time } = toDateTimeInTZ(start, TZ);
     if (!date) continue;
 
-    // Szukamy tytułu w oknie +/- 300 znaków względem znacznika <time>
     const idx = m.index ?? 0;
     const winStart = Math.max(0, idx - 300);
     const winEnd   = Math.min(html.length, idx + 600);
     const win = html.slice(winStart, winEnd);
 
-    // Kandydat tytułu: najbliższy <a>...</a> lub <h1-6>...</h1-6>
     let title = null;
-    const aMatch = win.match(/<a\b[^>]*>([^<]{3,120})<\/a>/i);
-    const hMatch = win.match(/<h[1-6]\b[^>]*>([^<]{3,160})<\/h[1-6]>/i);
+    const aMatch = win.match(/<a\b[^>]*>([^<]{3,160})<\/a>/i);
+    const hMatch = win.match(/<h[1-6]\b[^>]*>([^<]{3,200})<\/h[1-6]>/i);
     if (aMatch) title = aMatch[1].replace(/\s+/g,' ').trim();
     if (!title && hMatch) title = hMatch[1].replace(/\s+/g,' ').trim();
 
@@ -147,81 +160,4 @@ function fallbackOperaSlaska(html, defaults) {
       });
     }
   }
-
-  // 2) Jeśli nic nie wyszło, próbuj heurystyki tekstowej (data + godzina blisko siebie)
-  if (out.length === 0) {
-    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    const dateRe = /(\d{4}-\d{2}-\d{2}|\b\d{1,2}\.\d{1,2}\.\d{4}\b)/g;
-    const timeRe = /\b\d{1,2}:\d{2}\b/;
-
-    let m;
-    while ((m = dateRe.exec(text)) !== null) {
-      const iso = normalizeDateToken(m[1]);
-      if (!iso) continue;
-
-      const around = text.slice(Math.max(0, m.index - 120), m.index + 160);
-      const timeM = around.match(timeRe);
-      const titleCand = around
-        .replace(dateRe, ' ')
-        .replace(timeRe, ' ')
-        .replace(/\s+/g,' ')
-        .trim()
-        .slice(0, 120);
-
-      if (titleCand) {
-        out.push({
-          city: defaults.city, theatre: defaults.theatre,
-          title: titleCand, date: iso, time: timeM ? timeM[0] : null, url: defaults.url
-        });
-      }
-    }
-  }
-
-  // Unikalność (title+date+time)
-  const seen = new Set();
-  return out.filter(e=>{
-    const key = `${e.title}|${e.date}|${e.time||''}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-// ====== OGÓLNY fallback — bardzo zachowawczy (dla innych stron) ======
-function ultraSafeFallback(html, defaults) {
-  const events = [];
-  if (!html) return events;
-
-  // 1) time[datetime] blisko jakiegoś linku/nagłówka
-  const timeBlocks = [...html.matchAll(/<time[^>]*datetime=["']([^"']+)["'][^>]*>([\s\S]*?)<\/time>/gi)];
-  for (const m of timeBlocks) {
-    const start = m[1];
-    const { date, time } = toDateTimeInTZ(start, TZ);
-    if (!date) continue;
-
-    const idx = m.index ?? 0;
-    const winStart = Math.max(0, idx - 250);
-    const winEnd   = Math.min(html.length, idx + 500);
-    const win = html.slice(winStart, winEnd);
-    let title = null;
-    const aMatch = win.match(/<a\b[^>]*>([^<]{3,120})<\/a>/i);
-    const hMatch = win.match(/<h[1-6]\b[^>]*>([^<]{3,160})<\/h[1-6]>/i);
-    if (aMatch) title = aMatch[1].replace(/\s+/g,' ').trim();
-    if (!title && hMatch) title = hMatch[1].replace(/\s+/g,' ').trim();
-
-    if (title) {
-      events.push({
-        city: defaults.city, theatre: defaults.theatre,
-        title, date, time, url: defaults.url
-      });
-    }
-  }
-
-  // 2) Bardzo miękki tekstowy fallback
-  if (events.length === 0) {
-    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    const dateRe = /(\d{4}-\d{2}-\d{2}|\b\d{1,2}\.\d{1,2}\.\d{4}\b)/g;
-    const timeRe = /\b\d{1,2}:\d{2}\b/;
-
-    let m;
 
