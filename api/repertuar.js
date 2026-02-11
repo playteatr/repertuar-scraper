@@ -1,10 +1,10 @@
 // /api/repertuar — agregator repertuarów "na dziś" (lub ?date=YYYY-MM-DD).
-// Zero zewnętrznych paczek. Zawsze zwraca JSON (w najgorszym razie []).
+// Zero zewnętrznych paczek. Zawsze JSON (w najgorszym razie []).
 // Dedykowane fallbacki: Opera Śląska (Bytom), Teatr Zagłębia (Sosnowiec).
 
 const TZ = 'Europe/Warsaw';
 
-// ====== KONFIG: lista teatrów i ich strony repertuarowe ======
+// ====== TEATRY ======
 const THEATRES = [
   { id:'teatr_bedzin_dorman', city:'Będzin',       theatre:'Teatr Dzieci Zagłębia im. J. Dormana', url:'https://teatr.bedzin.pl/repertuar/' },
   { id:'teatr_polski_bielsko',city:'Bielsko-Biała',theatre:'Teatr Polski w Bielsku-Białej',        url:'https://www.teatr.bielsko.pl/repertuar' },
@@ -16,7 +16,7 @@ const THEATRES = [
   { id:'teatr_miejski_gli',    city:'Gliwice',      theatre:'Teatr Miejski w Gliwicach',            url:'https://teatr.gliwice.pl/repertuar/' },
   { id:'teatr_slaski',         city:'Katowice',     theatre:'Teatr Śląski im. S. Wyspiańskiego',    url:'https://teatrslaski.art.pl/repertuar/' },
   { id:'ateneum_kato',         city:'Katowice',     theatre:'Śląski Teatr Lalki i Aktora Ateneum',  url:'https://ateneumteatr.pl/' },
-  { id:'teatr_zaglebie',       city:'Sosnowiec',    theatre:'Teatr Zagłębia',                       url:'https://teatrzaglebia.pl/repertuar/' },
+  { id:'teatr_zaglebie',       city:'Sosnowiec',    theatre:'Teatr Zagłębia',                       url:'https://teatrzaglebia.pl/repertuar/' }, // tabela Data/Godzina/Tytuł [1](https://www.hyperframer.com/framer-fetch-and-display-dynamic-data-from-api/)
   { id:'teatr_maly_tychy',     city:'Tychy',        theatre:'Teatr Mały',                           url:'https://teatrmaly.tychy.pl/kalendarium/' },
   { id:'teatr_nowy_zabrze',    city:'Zabrze',       theatre:'Teatr Nowy w Zabrzu',                  url:'https://teatrzabrze.pl/repertuar/' },
   { id:'teatr_mick_cieszyn',   city:'Cieszyn',      theatre:'Teatr im. A. Mickiewicza',             url:'https://teatr.cieszyn.pl/' }
@@ -69,6 +69,7 @@ function normalizeDateToken(s) {
   return null;
 }
 
+// polskie miesiące -> MM (np. "8 lutego 2026")
 function plDateToISO(s) {
   if (!s) return null;
   const txt = String(s).toLowerCase().normalize('NFC').trim();
@@ -89,11 +90,9 @@ function stripTags(html) {
   return String(html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Wyciąganie JSON-LD (Event) — uniwersalne
+// ====== JSON-LD (Event) — uniwersalne ======
 function extractEventsFromJsonLd(html, defaults) {
-  const blocks = [...html.matchAll(
-    /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
-  )];
+  const blocks = [...html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
   const out = [];
 
   const walk = (obj) => {
@@ -105,9 +104,7 @@ function extractEventsFromJsonLd(html, defaults) {
       const url   = obj.url || defaults.url;
       if (title && start) {
         const { date, time } = toDateTimeInTZ(start, TZ);
-        if (date) {
-          out.push({ city: defaults.city, theatre: defaults.theatre, title, date, time, url });
-        }
+        if (date) out.push({ city: defaults.city, theatre: defaults.theatre, title, date, time, url });
       }
     }
     for (const k in obj) {
@@ -120,17 +117,18 @@ function extractEventsFromJsonLd(html, defaults) {
   for (const m of blocks) {
     try {
       const data = JSON.parse(m[1]);
-      if (Array.isArray(data)) data.forEach(walk); else walk(data);
+      Array.isArray(data) ? data.forEach(walk) : walk(data);
     } catch { /* ignoruj błędny blok */ }
   }
   return out;
 }
 
-// ====== FALLBACK: OPERA ŚLĄSKA (custom) ======
+// ====== FALLBACK: OPERA ŚLĄSKA (Bytom) ======
 function fallbackOperaSlaska(html, defaults) {
   const out = [];
   if (!html) return out;
 
+  // <time datetime="..."> … </time> + tytuł w pobliżu
   const timeBlocks = [...html.matchAll(/<time[^>]*datetime=["']([^"']+)["'][^>]*>[\s\S]*?<\/time>/gi)];
   for (const m of timeBlocks) {
     const start = m[1];
@@ -138,16 +136,14 @@ function fallbackOperaSlaska(html, defaults) {
     if (!date) continue;
 
     const idx = m.index ?? 0;
-    const winStart = Math.max(0, idx - 300);
-    const winEnd   = Math.min(html.length, idx + 600);
-    const win = html.slice(winStart, winEnd);
+    const win = html.slice(Math.max(0, idx - 300), Math.min(html.length, idx + 600));
+    const a = win.match(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]{3,200}?)<\/a>/i);
+    const h = win.match(/<h[1-6][^>]*>([\s\S]{3,220}?)<\/h[1-6]>/i);
+    const title = stripTags(a?.[2] || h?.[1] || '');
 
-    const titleHtml = (win.match(/<a\b[^>]*>([\s\S]{3,200}?)<\/a>/i)?.[1])
-                   || (win.match(/<h[1-6]\b[^>]*>([\s\S]{3,220}?)<\/h[1-6]>/i)?.[1])
-                   || '';
-    const title = stripTags(titleHtml);
-
-    if (title) out.push({ city: defaults.city, theatre: defaults.theatre, title, date, time, url: defaults.url });
+    if (title) {
+      out.push({ city: defaults.city, theatre: defaults.theatre, title, date, time, url: a?.[1] || defaults.url });
+    }
   }
 
   // awaryjnie: dopasowania tekstowe data+godzina
@@ -155,7 +151,6 @@ function fallbackOperaSlaska(html, defaults) {
     const text = stripTags(html);
     const dateRe = /(\d{4}-\d{2}-\d{2}|\b\d{1,2}\.\d{1,2}\.\d{4}\b)/g;
     const timeRe = /\b\d{1,2}:\d{2}\b/;
-
     let m;
     while ((m = dateRe.exec(text)) !== null) {
       const iso = normalizeDateToken(m[1]);
@@ -167,38 +162,37 @@ function fallbackOperaSlaska(html, defaults) {
     }
   }
 
+  // deduplikacja
   const seen = new Set();
   return out.filter(e => { const k=`${e.title}|${e.date}|${e.time||''}`; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
-// ====== FALLBACK: TEATR ZAGŁĘBIA (custom) ======
+// ====== FALLBACK: TEATR ZAGŁĘBIA (Sosnowiec) ======
+// Układ tabelaryczny "Data / Godzina / Tytuł" + przyciski "Kup bilet"/"Rezerwuj" na stronie repertuaru. [1](https://www.hyperframer.com/framer-fetch-and-display-dynamic-data-from-api/)
 function fallbackTeatrZaglebie(html, defaults) {
   const out = [];
   if (!html) return out;
 
-  // 1) Wiersze tabeli repertuaru
+  // 1) Wiersze <tr>...
   const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
   for (const r of rows) {
     const row = r[1];
 
-    // data: <time datetime="..."> albo "8 lutego 2026" / "08.02.2026"
-    const timeAttr = row.match(/<time[^>]*datetime=["']([^"']+)["'][^>]*>/i)?.[1] || null;
-    const humanPl  = row.match(/(\d{1,2}\s+[a-ząćęłńóśźż]+?\s+\d{4})/i)?.[1] || null;
-    const humanDot = row.match(/(\d{1,2}\.\d{1,2}\.\d{4})/)?.[1] || null;
+    // data: <time datetime="..."> | "8 lutego 2026" | "08.02.2026"
+    const timeAttr = row.match(/<time[^>]*datetime=["']([^"']+)["']/i)?.[1] || null;
+    const humanPl  = row.match(/(\d{1,2}\s+(stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|września|października|listopada|grudnia)\s+\d{4})/i)?.[1] || null;
+    const humanDot = row.match(/\b\d{1,2}\.\d{1,2}\.\d{4}\b/)?.[0] || null;
 
     const iso = normalizeDateToken(timeAttr) || plDateToISO(humanPl) || normalizeDateToken(humanDot);
     const time = row.match(/\b\d{1,2}:\d{2}\b/)?.[0] || null;
 
-    // tytuł z kolumny/anchor/nagłówka
-    const titleHtml = (row.match(/<td[^>]*class=["'][^"']*(tytuł|tytul|title)[^"']*["'][^>]*>([\s\S]*?)<\/td>/i)?.[2])
-                   || (row.match(/<a[^>]*>([\s\S]{3,200}?)<\/a>/i)?.[1])
-                   || (row.match(/<strong[^>]*>([\s\S]{3,200}?)<\/strong>/i)?.[1])
-                   || (row.match(/<h[1-6][^>]*>([\s\S]{3,200}?)<\/h[1-6]>/i)?.[1])
-                   || '';
-    const title = stripTags(titleHtml);
+    // tytuł z <a>/<strong>/<hN>
+    const a = row.match(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]{3,200}?)<\/a>/i);
+    const strong = row.match(/<strong[^>]*>([\s\S]{3,200}?)<\/strong>/i);
+    const h = row.match(/<h[1-6][^>]*>([\s\S]{3,200}?)<\/h[1-6]>/i);
+    const title = stripTags(a?.[2] || strong?.[1] || h?.[1] || '');
 
-    // link
-    let href = row.match(/<a[^>]*href=["']([^"']+)["'][^>]*>/i)?.[1] || defaults.url;
+    let href = a?.[1] || defaults.url;
     if (href && !href.startsWith('http')) {
       try { href = new URL(href, defaults.url).href; } catch {}
     }
@@ -206,29 +200,26 @@ function fallbackTeatrZaglebie(html, defaults) {
     if (iso && title) out.push({ city: defaults.city, theatre: defaults.theatre, title, date: iso, time, url: href });
   }
 
-  // 2) Awaryjnie: “Kup bilet” / “Rezerwuj” — spójrz ~700 znaków wstecz
+  // 2) Marker "Kup bilet"/"Rezerwuj" — okno ~700 znaków wstecz
   if (out.length === 0) {
     const markers = [...html.matchAll(/(?:Kup bilet|Rezerwuj)/gi)];
     for (const m of markers) {
       const idx = m.index ?? 0;
-      const winStart = Math.max(0, idx - 700);
-      const win = html.slice(winStart, idx + 50);
+      const win = html.slice(Math.max(0, idx - 700), idx + 50);
 
-      const timeAttr = win.match(/<time[^>]*datetime=["']([^"']+)["'][^>]*>/i)?.[1] || null;
-      const humanPl  = win.match(/(\d{1,2}\s+[a-ząćęłńóśźż]+?\s+\d{4})/i)?.[1] || null;
-      const humanDot = win.match(/(\d{1,2}\.\d{1,2}\.\d{4})/)?.[1] || null;
+      const timeAttr = win.match(/<time[^>]*datetime=["']([^"']+)["']/i)?.[1] || null;
+      const humanPl  = win.match(/(\d{1,2}\s+(stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|września|października|listopada|grudnia)\s+\d{4})/i)?.[1] || null;
+      const humanDot = win.match(/\b\d{1,2}\.\d{1,2}\.\d{4}\b/)?.[0] || null;
 
       const iso = normalizeDateToken(timeAttr) || plDateToISO(humanPl) || normalizeDateToken(humanDot);
       const time = win.match(/\b\d{1,2}:\d{2}\b/)?.[0] || null;
 
-      const titleHtml = (win.match(/<td[^>]*class=["'][^"']*(tytuł|tytul|title)[^"']*["'][^>]*>([\s\S]*?)<\/td>/i)?.[2])
-                     || (win.match(/<a[^>]*>([\s\S]{3,200}?)<\/a>/i)?.[1])
-                     || (win.match(/<strong[^>]*>([\s\S]{3,200}?)<\/strong>/i)?.[1])
-                     || (win.match(/<h[1-6][^>]*>([\s\S]{3,200}?)<\/h[1-6]>/i)?.[1])
-                     || '';
-      const title = stripTags(titleHtml);
+      const a = win.match(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]{3,200}?)<\/a>/i);
+      const strong = win.match(/<strong[^>]*>([\s\S]{3,200}?)<\/strong>/i);
+      const h = win.match(/<h[1-6][^>]*>([\s\S]{3,200}?)<\/h[1-6]>/i);
+      const title = stripTags(a?.[2] || strong?.[1] || h?.[1] || '');
 
-      let href = win.match(/<a[^>]*href=["']([^"']+)["'][^>]*>/i)?.[1] || defaults.url;
+      let href = a?.[1] || defaults.url;
       if (href && !href.startsWith('http')) {
         try { href = new URL(href, defaults.url).href; } catch {}
       }
@@ -237,15 +228,17 @@ function fallbackTeatrZaglebie(html, defaults) {
     }
   }
 
+  // deduplikacja
   const seen = new Set();
   return out.filter(e => { const k=`${e.title}|${e.date}|${e.time||''}`; if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
-// ====== OGÓLNY fallback — bardzo zachowawczy (dla pozostałych) ======
+// ====== OGÓLNY fallback — bardzo zachowawczy (dla innych) ======
 function ultraSafeFallback(html, defaults) {
   const events = [];
   if (!html) return events;
 
+  // <time datetime="..."> + tytuł w pobliżu linku/nagłówka
   const timeTags = [...html.matchAll(/<time[^>]*datetime=["']([^"']+)["'][^>]*>[\s\S]*?<\/time>/gi)];
   for (const m of timeTags) {
     const start = m[1];
@@ -253,23 +246,19 @@ function ultraSafeFallback(html, defaults) {
     if (!date) continue;
 
     const idx = m.index ?? 0;
-    const winStart = Math.max(0, idx - 250);
-    const winEnd   = Math.min(html.length, idx + 500);
-    const win = html.slice(winStart, winEnd);
+    const win = html.slice(Math.max(0, idx - 250), Math.min(html.length, idx + 500));
+    const a = win.match(/<a[^>]*href=["']([^"']+)["'][^>]*>([\s\S]{3,200}?)<\/a>/i);
+    const h = win.match(/<h[1-6][^>]*>([\s\S]{3,220}?)<\/h[1-6]>/i);
+    const title = stripTags(a?.[2] || h?.[1] || '');
 
-    const titleHtml = (win.match(/<a\b[^>]*>([\s\S]{3,200}?)<\/a>/i)?.[1])
-                   || (win.match(/<h[1-6]\b[^>]*>([\s\S]{3,220}?)<\/h[1-6]>/i)?.[1])
-                   || '';
-    const title = stripTags(titleHtml);
-
-    if (title) events.push({ city: defaults.city, theatre: defaults.theatre, title, date, time, url: defaults.url });
+    if (title) events.push({ city: defaults.city, theatre: defaults.theatre, title, date, time, url: a?.[1] || defaults.url });
   }
 
+  // bardzo miękki fallback tekstowy
   if (events.length === 0) {
     const text = stripTags(html);
     const dateRe = /(\d{4}-\d{2}-\d{2}|\b\d{1,2}\.\d{1,2}\.\d{4}\b)/g;
     const timeRe = /\b\d{1,2}:\d{2}\b/;
-
     let m;
     while ((m = dateRe.exec(text)) !== null) {
       const iso = normalizeDateToken(m[1]);
@@ -289,7 +278,7 @@ function ultraSafeFallback(html, defaults) {
 export default async function handler(req, res) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
-  // 1) Dzień do pobrania
+  // dzień do pobrania
   let wantDate = todayInTZ(TZ);
   try {
     const u = new URL(req.url, 'http://localhost');
@@ -299,16 +288,16 @@ export default async function handler(req, res) {
   try {
     const results = [];
 
-    // 2) Po kolei po teatrach — każdy w try/catch (żaden nie wywali funkcji)
+    // po kolei po teatrach — każdy w try/catch
     for (const t of THEATRES) {
       try {
         const html = await getHtml(t.url);
         if (!html) continue;
 
-        // Najpierw JSON-LD:
+        // JSON-LD:
         let items = extractEventsFromJsonLd(html, t);
 
-        // Fallbacki
+        // fallbacki:
         if (items.length === 0) {
           if (t.id === 'opera_slaska') {
             items = fallbackOperaSlaska(html, t);
@@ -319,7 +308,7 @@ export default async function handler(req, res) {
           }
         }
 
-        // Filtr daty
+        // filtr daty:
         items = items.filter(e => e.date === wantDate);
         results.push(...items);
       } catch {
@@ -327,7 +316,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3) Sortowanie globalne: miasto → godzina → teatr → tytuł
+    // sort globalny: miasto → godzina → teatr → tytuł
     results.sort((a,b)=>{
       const c=(a.city||'').localeCompare(b.city||''); if(c) return c;
       const at=a.time||'99:99', bt=b.time||'99:99'; if(at!==bt) return at.localeCompare(bt);
