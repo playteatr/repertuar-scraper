@@ -24,7 +24,8 @@ export default async function handler(req, res) {
 const SOURCES = [
   `${base}/api/zaglebie${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}`,
   `${base}/api/opera${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}`,
-  `${base}/api/slaski${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}` // <— NOWE
+  `${base}/api/slaski${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}`,
+  `${base}/api/polski-bielsko${dateParam ? `?date=${encodeURIComponent(dateParam)}` : ''}` // <— NOWE
 ];
 
 
